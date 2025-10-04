@@ -1,0 +1,48 @@
+# Nextflow
+.nextflow*
+work/
+results/
+test_results/
+
+# Reports
+*.html
+*.svg
+trace.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Data files
+*.cool
+*.mcool
+*.hic
+*.bedpe
+*.arc
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
