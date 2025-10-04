@@ -7,10 +7,16 @@ A Nextflow pipeline for detecting chromatin loops from Hi-C/Micro-C data using r
 This pipeline performs multi-resolution loop detection from Hi-C/Micro-C contact matrices:
 
 1. **Normalization** - Uses [raichu](https://github.com/open2c/raichu) for ICE-like normalization
-2. **Loop Calling** - Applies [pyHICCUPS](https://github.com/ParkerLab/pyHICCUPS) at multiple resolutions (default: 2kb, 5kb, 10kb)
-3. **Combination** - Merges loops from all resolutions
-4. **Format Conversion** - Converts BEDPE to arc format for genome browser visualization
-5. **Statistics** - Generates summary statistics
+2. **Chromosome Detection** - Automatically extracts chromosome list from the input file
+3. **Parallel Loop Calling** - Applies [pyHICCUPS](https://github.com/ParkerLab/pyHICCUPS) per chromosome at multiple resolutions (default: 2kb, 5kb, 10kb) for maximum parallelization
+4. **Merging** - Combines per-chromosome results for each resolution
+5. **Combination** - Merges loops from all resolutions
+6. **Format Conversion** - Converts BEDPE to arc format for genome browser visualization
+7. **Statistics** - Generates summary statistics
+
+### Parallelization
+
+The pipeline parallelizes loop calling by **chromosome and resolution**, meaning if you have 23 chromosomes and 3 resolutions, it will run up to **69 parallel tasks** (23 × 3), significantly reducing runtime on HPC clusters.
 
 ## Quick Start
 
@@ -84,13 +90,21 @@ nextflow run main.nf \
 results/
 ├── raichu/
 │   └── normalized.cool          # Normalized contact matrix
+├── chromosomes/
+│   └── chromosomes.txt          # List of chromosomes
 ├── loops/
 │   ├── res_2000/
-│   │   └── loops_2000.bedpe    # Loops at 2kb resolution
+│   │   ├── per_chr/            # Per-chromosome BEDPE files
+│   │   │   ├── chr1_loops_2000.bedpe
+│   │   │   ├── chr2_loops_2000.bedpe
+│   │   │   └── ...
+│   │   └── loops_2000.bedpe    # Merged loops at 2kb resolution
 │   ├── res_5000/
-│   │   └── loops_5000.bedpe    # Loops at 5kb resolution
+│   │   ├── per_chr/
+│   │   └── loops_5000.bedpe    # Merged loops at 5kb resolution
 │   └── res_10000/
-│       └── loops_10000.bedpe    # Loops at 10kb resolution
+│   │   ├── per_chr/
+│       └── loops_10000.bedpe    # Merged loops at 10kb resolution
 ├── combined/
 │   └── combined_loops.bedpe     # All loops merged
 ├── visualization/
@@ -159,15 +173,19 @@ nextflow run main.nf \
 
 ### Default Resources
 
-| Process | CPUs | Memory | Time |
-|---------|------|--------|------|
-| RAICHU_NORMALIZE | 4 | 8 GB | 6h |
-| PYHICCUPS_CALL_LOOPS | 4 | 8 GB | 8h |
-| COMBINE_LOOPS | 1 | 2 GB | 1h |
-| BEDPE_TO_ARC | 1 | 2 GB | 1h |
-| GENERATE_STATS | 1 | 2 GB | 1h |
+| Process | CPUs | Memory | Time | Parallelization |
+|---------|------|--------|------|----------------|
+| RAICHU_NORMALIZE | 4 | 8 GB | 6h | 1 task |
+| GET_CHROMOSOMES | 1 | 2 GB | 1h | 1 task |
+| PYHICCUPS_CALL_LOOPS | 4 | 8 GB | 8h | N chroms × M resolutions |
+| MERGE_CHROMOSOME_LOOPS | 1 | 2 GB | 1h | M resolutions |
+| COMBINE_LOOPS | 1 | 2 GB | 1h | 1 task |
+| BEDPE_TO_ARC | 1 | 2 GB | 1h | 1 task |
+| GENERATE_STATS | 1 | 2 GB | 1h | 1 task |
 
-Adjust in `nextflow.config` based on your data size.
+**Performance Note**: The pipeline parallelizes loop calling per chromosome, so if you have access to an HPC cluster with many cores, you can process all chromosomes simultaneously, reducing total runtime from days to hours.
+
+Adjust resources in `nextflow.config` based on your data size and available compute.
 
 ## Troubleshooting
 

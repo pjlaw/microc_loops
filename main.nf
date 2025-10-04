@@ -56,19 +56,52 @@ process RAICHU_NORMALIZE {
 }
 
 /*
- * Process: Call loops at a specific resolution using pyHICCUPS
+ * Process: Extract chromosome list from cool file
  */
-process PYHICCUPS_CALL_LOOPS {
-    tag "resolution_${resolution}"
-    publishDir "${params.outdir}/loops/res_${resolution}", mode: 'copy'
+process GET_CHROMOSOMES {
     container 'python:3.10-slim'
 
     input:
-    path normalized_cool
-    val resolution
+    path cool_file
 
     output:
-    path "loops_${resolution}.bedpe", emit: loops
+    path 'chromosomes.txt', emit: chromosomes
+
+    script:
+    """
+    #!/usr/bin/env python3
+    import cooler
+
+    # Install cooler
+    import subprocess
+    subprocess.run(['pip', 'install', '--quiet', 'cooler'], check=True)
+    
+    # Load cool file and get chromosomes
+    clr = cooler.Cooler('${cool_file}')
+    chromosomes = clr.chromnames
+    
+    # Write chromosomes to file (one per line)
+    with open('chromosomes.txt', 'w') as f:
+        for chrom in chromosomes:
+            f.write(f'{chrom}\\n')
+    
+    print(f"Found {len(chromosomes)} chromosomes: {', '.join(chromosomes)}")
+    """
+}
+
+/*
+ * Process: Call loops per chromosome at a specific resolution using pyHICCUPS
+ */
+process PYHICCUPS_CALL_LOOPS_PER_CHROM {
+    tag "res_${resolution}_chr_${chromosome}"
+    publishDir "${params.outdir}/loops/res_${resolution}/per_chrom", mode: 'copy', pattern: "*.bedpe"
+    container 'python:3.10-slim'
+
+    input:
+    tuple path(normalized_cool), val(resolution), val(chromosome)
+
+    output:
+    tuple val(resolution), path("loops_${resolution}_${chromosome}.bedpe"), emit: loops
 
     script:
     def extra_args = params.pyhiccups_options ?: ''
@@ -76,11 +109,65 @@ process PYHICCUPS_CALL_LOOPS {
     # Install pyHICCUPS and dependencies
     pip install --quiet pyhiccups cooler numpy
 
-    # Call loops at specified resolution
+    # Call loops for this chromosome at specified resolution
     pyhiccups call ${extra_args} \
         --resolution ${resolution} \
-        --output loops_${resolution}.bedpe \
+        --chromosome ${chromosome} \
+        --output loops_${resolution}_${chromosome}.bedpe \
         ${normalized_cool}
+    """
+}
+
+/*
+ * Process: Merge per-chromosome loops for a given resolution
+ */
+process MERGE_CHROMOSOME_LOOPS {
+    tag "resolution_${resolution}"
+    publishDir "${params.outdir}/loops/res_${resolution}", mode: 'copy'
+    container 'python:3.10-slim'
+
+    input:
+    tuple val(resolution), path('chrom_loops_*.bedpe')
+
+    output:
+    path "loops_${resolution}.bedpe", emit: loops
+
+    script:
+    """
+    #!/usr/bin/env python3
+    import sys
+    from pathlib import Path
+
+    # Get all chromosome-specific BEDPE files
+    bedpe_files = sorted(Path('.').glob('chrom_loops_*.bedpe'))
+    
+    if not bedpe_files:
+        print("ERROR: No chromosome loop files found", file=sys.stderr)
+        sys.exit(1)
+
+    # Combine all chromosome loops
+    all_loops = []
+    header = None
+    
+    for bedpe_file in bedpe_files:
+        with open(bedpe_file) as f:
+            lines = f.readlines()
+            if lines:
+                # Store header from first file
+                if header is None and lines[0].startswith('#'):
+                    header = lines[0]
+                    lines = lines[1:]
+                elif lines[0].startswith('#'):
+                    lines = lines[1:]
+                all_loops.extend(lines)
+    
+    # Write merged output
+    with open('loops_${resolution}.bedpe', 'w') as out:
+        if header:
+            out.write(header)
+        out.writelines(all_loops)
+    
+    print(f"Merged {len(all_loops)} loops from {len(bedpe_files)} chromosomes for resolution ${resolution}")
     """
 }
 
@@ -273,20 +360,39 @@ workflow {
     // Step 1: Normalize with raichu
     RAICHU_NORMALIZE(cool_file_ch)
     
-    // Step 2: Call loops at each resolution
-    PYHICCUPS_CALL_LOOPS(
-        RAICHU_NORMALIZE.out.normalized_cool,
-        resolutions_ch
-    )
+    // Step 2: Get list of chromosomes
+    GET_CHROMOSOMES(RAICHU_NORMALIZE.out.normalized_cool)
     
-    // Step 3: Combine all loops
-    all_loops = PYHICCUPS_CALL_LOOPS.out.loops.collect()
+    // Create chromosome channel from file
+    chromosomes_ch = GET_CHROMOSOMES.out.chromosomes
+        .splitText()
+        .map { line -> line.trim() }
+        .filter { chrom -> chrom.length() > 0 }
+    
+    // Step 3: Call loops per chromosome per resolution (parallel execution)
+    // Combine resolutions with chromosomes to create all combinations
+    // Then combine with the normalized cool file
+    res_chrom_combinations = resolutions_ch
+        .combine(chromosomes_ch)
+        .combine(RAICHU_NORMALIZE.out.normalized_cool)
+        .map { res, chrom, cool -> tuple(cool, res, chrom) }
+    
+    PYHICCUPS_CALL_LOOPS_PER_CHROM(res_chrom_combinations)
+    
+    // Step 4: Group by resolution and merge chromosome results
+    loops_by_resolution = PYHICCUPS_CALL_LOOPS_PER_CHROM.out.loops
+        .groupTuple()
+    
+    MERGE_CHROMOSOME_LOOPS(loops_by_resolution)
+    
+    // Step 5: Combine all resolutions
+    all_loops = MERGE_CHROMOSOME_LOOPS.out.loops.collect()
     COMBINE_LOOPS(all_loops)
     
-    // Step 4: Convert to arc format
+    // Step 6: Convert to arc format
     BEDPE_TO_ARC(COMBINE_LOOPS.out.combined)
     
-    // Step 5: Generate statistics
+    // Step 7: Generate statistics
     GENERATE_STATS(
         RAICHU_NORMALIZE.out.normalized_cool,
         COMBINE_LOOPS.out.combined,
@@ -295,7 +401,7 @@ workflow {
 
     publish:
     normalized_data = RAICHU_NORMALIZE.out.normalized_cool
-    loop_calls = PYHICCUPS_CALL_LOOPS.out.loops
+    loop_calls = MERGE_CHROMOSOME_LOOPS.out.loops
     combined_results = COMBINE_LOOPS.out.combined
     visualization = BEDPE_TO_ARC.out.arc
     statistics = GENERATE_STATS.out.stats
