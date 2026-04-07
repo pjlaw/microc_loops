@@ -222,24 +222,7 @@ ls -la work/
 cat .nextflow.log
 ```
 
-## Citation
-
-If you use this pipeline, please cite:
-
-- **Nextflow**: Di Tommaso, P., et al. (2017). Nextflow enables reproducible computational workflows. Nature Biotechnology 35, 316–319.
-- **raichu**: [Citation for raichu tool]
-- **pyHICCUPS**: [Citation for pyHICCUPS tool]
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Contact
-
-For issues and questions:
-- GitHub Issues: https://github.com/plaw/microc_loops/issues
-- Discussions: https://github.com/plaw/microc_loops/discussions
 
 ## Acknowledgments
 
-Built with ❤️ using Nextflow and assisted by Seqera AI.
+Built assisted by Seqera AI.

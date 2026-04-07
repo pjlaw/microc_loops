@@ -16,18 +16,20 @@ params.resolutions = '2000,5000,10000'
 params.raichu_options = ''
 params.pyhiccups_options = ''
 
+
 // Validate required inputs
 if (!params.input) {
-    error "ERROR: --input parameter is required (path to input .cool or .mcool file)"
+    error "ERROR: --input parameter is required (path or glob pattern to input .cool or .mcool files)"
 }
 
 // Log parameters
 log.info """\
     RAICHU + pyHICCUPS PIPELINE
     ===========================
-    input       : ${params.input}
-    outdir      : ${params.outdir}
-    resolutions : ${params.resolutions}
+    input          : ${params.input}
+    outdir         : ${params.outdir}
+    resolutions    : ${params.resolutions}
+    combine_samples: ${params.combine_samples}
     """
     .stripIndent()
 
@@ -35,86 +37,70 @@ log.info """\
  * Process: Normalize Hi-C data using raichu
  */
 process RAICHU_NORMALIZE {
-    publishDir "${params.outdir}/raichu", mode: 'copy'
-    container 'python:3.10-slim'
+    tag "${sample_id}"
+    conda '/data/scratch/DGE/DUDGE/MOPOPGEN/plaw/conda_envs/raichu'
 
     input:
-    path cool_file
+    tuple val(sample_id), path(cool_file)
 
     output:
-    path 'normalized.cool', emit: normalized_cool
+    tuple val(sample_id), path(cool_file), emit: normalized_cool
 
     script:
     def extra_args = params.raichu_options ?: ''
     """
-    # Install raichu
-    pip install --quiet raichu-hic
+    # raichu will add the normalization weights to the same cool file, so we can just pass it through as output
 
-    # Run raichu normalization
-    raichu normalize ${extra_args} ${cool_file} normalized.cool
+    # Run raichu normalization for each resulution (if mcool) or single resolution (if cool)
+    if [[ -f "${cool_file}" && "${cool_file}" == *.mcool ]]; then
+        # If it's an mcool file, we need to specify the resolution in the URI
+        resolutions=$(echo "${params.resolutions}" | tr ',' '\n')
+        for res in \$resolutions; do
+            echo "Processing resolution ${res} for sample ${sample_id}"
+            raichu --cool-uri ${cool_file}::/resolutions/\${res} --window-size 200 -p ${task.cpus} -n raichu_weight -f ${extra_args}
+        done
+    else
+        # If it's a cool file, we can only use one resolution (the one specified in the filename or default)
+        raichu --cool-uri ${cool_file} --window-size 200 -p ${task.cpus} -n raichu_weight -f ${extra_args}
+    fi   
     """
 }
 
-/*
- * Process: Extract chromosome list from cool file
- */
-process GET_CHROMOSOMES {
-    container 'python:3.10-slim'
-
-    input:
-    path cool_file
-
-    output:
-    path 'chromosomes.txt', emit: chromosomes
-
-    script:
-    """
-    #!/usr/bin/env python3
-    import cooler
-
-    # Install cooler
-    import subprocess
-    subprocess.run(['pip', 'install', '--quiet', 'cooler'], check=True)
-    
-    # Load cool file and get chromosomes
-    clr = cooler.Cooler('${cool_file}')
-    chromosomes = clr.chromnames
-    
-    # Write chromosomes to file (one per line)
-    with open('chromosomes.txt', 'w') as f:
-        for chrom in chromosomes:
-            f.write(f'{chrom}\\n')
-    
-    print(f"Found {len(chromosomes)} chromosomes: {', '.join(chromosomes)}")
-    """
-}
 
 /*
  * Process: Call loops per chromosome at a specific resolution using pyHICCUPS
  */
 process PYHICCUPS_CALL_LOOPS_PER_CHROM {
-    tag "res_${resolution}_chr_${chromosome}"
-    publishDir "${params.outdir}/loops/res_${resolution}/per_chrom", mode: 'copy', pattern: "*.bedpe"
-    container 'python:3.10-slim'
+    tag "${sample_id}_pyhiccups_${resolution}_chr_${chromosome}"
+    conda '/data/scratch/DGE/DUDGE/MOPOPGEN/plaw/conda_envs/raichu'
 
     input:
-    tuple path(normalized_cool), val(resolution), val(chromosome)
+    tuple val(sample_id), path(normalized_cool), val(resolution), val(chromosome)
 
     output:
-    tuple val(resolution), path("loops_${resolution}_${chromosome}.bedpe"), emit: loops
+    tuple val(sample_id), val(resolution), path("loops_${resolution}_${chromosome}.bedpe"), emit: loops
 
     script:
     def extra_args = params.pyhiccups_options ?: ''
     """
-    # Install pyHICCUPS and dependencies
-    pip install --quiet pyhiccups cooler numpy
-
     # Call loops for this chromosome at specified resolution
-    pyhiccups call ${extra_args} \
-        --resolution ${resolution} \
-        --chromosome ${chromosome} \
-        --output loops_${resolution}_${chromosome}.bedpe \
-        ${normalized_cool}
+    # hard coded in as suggested by Wang et al (2026) for microC data
+    
+    if [[ "${resolution}" == "10000" ]]; then
+        max_apart = 4000000
+    else if [[ "${resolution}" == "5000" ]]; then
+        max_apart = 2000000
+    else if [[ "${resolution}" == "2000" ]]; then
+        max_apart = 1000000
+    else
+        #use the default§
+        max_apart = 10000000
+    fi
+
+    pyHICCUPS -p ${normalized_cool} --chroms ${chromosome} -O loops_${resolution}_${chromosome}.bedpe \
+            --pw 2 3 4 --ww 5 6 7 --maxww 7 --only-anchors --min-local-reads 100 --nproc ${task.cpus} \
+            --clr-weight-name obj_weight --maxapart \$max_apart --logFile ${sample_id}_${resolution}_${chromosome}_hicpeaks.raichu.log
+    
     """
 }
 
@@ -122,208 +108,62 @@ process PYHICCUPS_CALL_LOOPS_PER_CHROM {
  * Process: Merge per-chromosome loops for a given resolution
  */
 process MERGE_CHROMOSOME_LOOPS {
-    tag "resolution_${resolution}"
-    publishDir "${params.outdir}/loops/res_${resolution}", mode: 'copy'
-    container 'python:3.10-slim'
-
+    tag "${sample_id}_resolution_${resolution}"
+    
     input:
-    tuple val(resolution), path('chrom_loops_*.bedpe')
+    tuple val(sample_id), val(resolution), path('chrom_loops_*.txt')
 
     output:
-    path "loops_${resolution}.bedpe", emit: loops
+    tuple val(sample_id), path("loops_${resolution}.bedpe"), emit: loops
 
     script:
     """
-    #!/usr/bin/env python3
-    import sys
-    from pathlib import Path
-
-    # Get all chromosome-specific BEDPE files
-    bedpe_files = sorted(Path('.').glob('chrom_loops_*.bedpe'))
+    cat chrom_loops_*.bedpe > loops_${resolution}.bedpe
     
-    if not bedpe_files:
-        print("ERROR: No chromosome loop files found", file=sys.stderr)
-        sys.exit(1)
-
-    # Combine all chromosome loops
-    all_loops = []
-    header = None
-    
-    for bedpe_file in bedpe_files:
-        with open(bedpe_file) as f:
-            lines = f.readlines()
-            if lines:
-                # Store header from first file
-                if header is None and lines[0].startswith('#'):
-                    header = lines[0]
-                    lines = lines[1:]
-                elif lines[0].startswith('#'):
-                    lines = lines[1:]
-                all_loops.extend(lines)
-    
-    # Write merged output
-    with open('loops_${resolution}.bedpe', 'w') as out:
-        if header:
-            out.write(header)
-        out.writelines(all_loops)
-    
-    print(f"Merged {len(all_loops)} loops from {len(bedpe_files)} chromosomes for resolution ${resolution}")
     """
 }
 
 /*
- * Process: Combine loops from all resolutions
+ * Process: Combine loops from all resolutions for a single sample
  */
 process COMBINE_LOOPS {
-    publishDir "${params.outdir}/combined", mode: 'copy'
-    container 'python:3.10-slim'
+    tag "${sample_id}"
+    conda '/data/scratch/DGE/DUDGE/MOPOPGEN/plaw/conda_envs/raichu'
 
     input:
-    path 'loops_*.bedpe'
+    tuple val(sample_id), path('loops_*.bedpe')
 
     output:
-    path 'combined_loops.bedpe', emit: combined
+    tuple val(sample_id), path('combined_loops.bedpe'), emit: combined
 
     script:
     """
-    #!/usr/bin/env python3
-    import sys
-    from pathlib import Path
-
-    # Get all input BEDPE files
-    bedpe_files = sorted(Path('.').glob('loops_*.bedpe'))
-    
-    if not bedpe_files:
-        print("ERROR: No loop files found", file=sys.stderr)
-        sys.exit(1)
-
-    # Combine all loops
-    all_loops = []
-    header = None
-    
-    for bedpe_file in bedpe_files:
-        with open(bedpe_file) as f:
-            lines = f.readlines()
-            if lines:
-                # Store header from first file
-                if header is None and lines[0].startswith('#'):
-                    header = lines[0]
-                    lines = lines[1:]
-                elif lines[0].startswith('#'):
-                    lines = lines[1:]
-                all_loops.extend(lines)
-    
-    # Write combined output
-    with open('combined_loops.bedpe', 'w') as out:
-        if header:
-            out.write(header)
-        out.writelines(all_loops)
-    
-    print(f"Combined {len(all_loops)} loops from {len(bedpe_files)} files")
+    # hard coded in as suggested by Wang et al (2026) for microC data
+    resolutions=$(echo "${params.resolutions}" | tr ',' ' ')
+    max_res=$(echo "${params.resolutions}" | awk -F',' '{for(i=1;i<=NF;i++) print $i}' | sort -n | tail -1)
+    combine-resolutions -O combined_loops.bedpe -p loops_*.bedpe -R \$resolutions -G \$max_res -M 100000 --max-res \$max_res --minapart 8
+     
     """
 }
 
 /*
- * Process: Convert BEDPE to arc format for visualization
+ * Process: Convert BEDPE to arc format for visualisation
  */
 process BEDPE_TO_ARC {
-    publishDir "${params.outdir}/visualization", mode: 'copy'
-    container 'python:3.10-slim'
+    tag "${sample_id}"
+    publishDir "${params.outdir}/${sample_id}/visualisation", mode: 'copy'
+    
 
     input:
-    path bedpe
+    tuple val(sample_id), path(bedpe)
 
     output:
-    path 'loops.arc', emit: arc
+    tuple val(sample_id), path('loops.arc'), emit: arc
 
     script:
     """
-    #!/usr/bin/env python3
-    import sys
-
-    def bedpe_to_arc(bedpe_file, arc_file):
-        with open(bedpe_file) as f_in, open(arc_file, 'w') as f_out:
-            for line in f_in:
-                if line.startswith('#'):
-                    continue
-                
-                fields = line.strip().split('\\t')
-                if len(fields) < 6:
-                    continue
-                
-                chrom1, start1, end1 = fields[0], int(fields[1]), int(fields[2])
-                chrom2, start2, end2 = fields[3], int(fields[4]), int(fields[5])
-                
-                # Skip inter-chromosomal loops
-                if chrom1 != chrom2:
-                    continue
-                
-                # Calculate midpoints
-                mid1 = (start1 + end1) // 2
-                mid2 = (start2 + end2) // 2
-                
-                # Arc format: chr start end score
-                # Use the span of the loop as a simple score
-                score = abs(mid2 - mid1)
-                
-                # Write arc (from smaller to larger coordinate)
-                if mid1 < mid2:
-                    f_out.write(f"{chrom1}\\t{mid1}\\t{mid2}\\t{score}\\n")
-                else:
-                    f_out.write(f"{chrom1}\\t{mid2}\\t{mid1}\\t{score}\\n")
-
-    bedpe_to_arc('${bedpe}', 'loops.arc')
-    print("Conversion to arc format complete")
-    """
-}
-
-/*
- * Process: Generate summary statistics
- */
-process GENERATE_STATS {
-    publishDir "${params.outdir}/stats", mode: 'copy'
-    container 'python:3.10-slim'
-
-    input:
-    path normalized_cool
-    path combined_bedpe
-    path arc_file
-
-    output:
-    path 'pipeline_stats.txt', emit: stats
-
-    script:
-    """
-    #!/usr/bin/env python3
-    import os
-    from pathlib import Path
-
-    stats = []
-    stats.append("=== Pipeline Statistics ===\\n")
+    cut -f 1-6,8 --output-delimiter="\t" ${bedpe} > loops.arc
     
-    # File sizes
-    if Path('${normalized_cool}').exists():
-        size = Path('${normalized_cool}').stat().st_size
-        stats.append(f"Normalized cool file size: {size:,} bytes\\n")
-    
-    # Count loops
-    if Path('${combined_bedpe}').exists():
-        with open('${combined_bedpe}') as f:
-            loop_count = sum(1 for line in f if not line.startswith('#'))
-        stats.append(f"Total loops called: {loop_count:,}\\n")
-    
-    # Count arcs
-    if Path('${arc_file}').exists():
-        with open('${arc_file}') as f:
-            arc_count = sum(1 for line in f if line.strip())
-        stats.append(f"Intra-chromosomal loops (arcs): {arc_count:,}\\n")
-    
-    # Write stats
-    with open('pipeline_stats.txt', 'w') as f:
-        f.writelines(stats)
-    
-    # Print to stdout
-    print(''.join(stats))
     """
 }
 
@@ -342,69 +182,73 @@ output {
     }
     visualization {
         path 'visualization'
-    }
-    statistics {
-        path 'stats'
-    }
+    }    
 }
 
 workflow {
     main:
-    // Create input channel
-    cool_file_ch = channel.fromPath(params.input, checkIfExists: true)
+
+    // Create input channel from multiple cool files
+    // Extract sample ID from filename (remove .cool or .mcool extension)
+    cool_files_ch = channel.fromPath(params.input, checkIfExists: true)
+        .map { file -> 
+            def sample_id = file.baseName.replaceAll(/\.(m)?cool$/, '')
+            tuple(sample_id, file)
+        }
     
     // Parse resolutions
-    resolutions_list = params.resolutions.tokenize(',').collect { it.trim() }
+    resolutions_list = params.resolutions.tokenize(',').collect { v -> v.trim() }
     resolutions_ch = channel.of(resolutions_list).flatten()
+
+    //TODO: filechecking
+    // resolutions must match those in the mcool file
+    // if cool file is given, can only use one resoulution
     
     // Step 1: Normalize with raichu
-    RAICHU_NORMALIZE(cool_file_ch)
+    RAICHU_NORMALIZE(cool_files_ch)
     
-    // Step 2: Get list of chromosomes
-    GET_CHROMOSOMES(RAICHU_NORMALIZE.out.normalized_cool)
-    
-    // Create chromosome channel from file
-    chromosomes_ch = GET_CHROMOSOMES.out.chromosomes
-        .splitText()
-        .map { line -> line.trim() }
-        .filter { chrom -> chrom.length() > 0 }
+    // Step 2: Create a channel of chromosome names: chr1-chr22, chrX, chrY
+    // Create chromosome channel from file for each sample
+    chromosomes = channel.of((1..22).collect { n -> "chr${n}" } + ['chrX', 'chrY'] ).flatten()
+
+    // Create sample-chromosome combinations
+    chromosomes_per_sample = cool_files_ch
+        .map { sample_id, file -> sample_id }
+        .combine(chromosomes)
+        }
     
     // Step 3: Call loops per chromosome per resolution (parallel execution)
-    // Combine resolutions with chromosomes to create all combinations
+    // Create all combinations: sample_id, resolution, chromosome
     // Then combine with the normalized cool file
-    res_chrom_combinations = resolutions_ch
-        .combine(chromosomes_ch)
-        .combine(RAICHU_NORMALIZE.out.normalized_cool)
-        .map { res, chrom, cool -> tuple(cool, res, chrom) }
+    res_chrom_combinations = chromosomes_per_sample
+        .combine(resolutions_ch)
+        .map { sample_id, chrom, res -> tuple(sample_id, chrom, res) }
+        .combine(RAICHU_NORMALIZE.out.normalized_cool, by: 0)
+        .map { sample_id, chrom, res, cool -> tuple(sample_id, cool, res, chrom) }
     
     PYHICCUPS_CALL_LOOPS_PER_CHROM(res_chrom_combinations)
     
-    // Step 4: Group by resolution and merge chromosome results
-    loops_by_resolution = PYHICCUPS_CALL_LOOPS_PER_CHROM.out.loops
-        .groupTuple()
+    // Step 4: Group by sample_id and resolution, then merge chromosome results
+    loops_by_sample_resolution = PYHICCUPS_CALL_LOOPS_PER_CHROM.out.loops
+        .groupTuple(by: [0, 1])
     
-    MERGE_CHROMOSOME_LOOPS(loops_by_resolution)
+    MERGE_CHROMOSOME_LOOPS(loops_by_sample_resolution)
     
-    // Step 5: Combine all resolutions
-    all_loops = MERGE_CHROMOSOME_LOOPS.out.loops.collect()
-    COMBINE_LOOPS(all_loops)
+    // Step 5: Combine all resolutions per sample
+    loops_by_sample = MERGE_CHROMOSOME_LOOPS.out.loops
+        .groupTuple(by: 0)
+    
+    COMBINE_LOOPS(loops_by_sample)
     
     // Step 6: Convert to arc format
     BEDPE_TO_ARC(COMBINE_LOOPS.out.combined)
     
-    // Step 7: Generate statistics
-    GENERATE_STATS(
-        RAICHU_NORMALIZE.out.normalized_cool,
-        COMBINE_LOOPS.out.combined,
-        BEDPE_TO_ARC.out.arc
-    )
-
     publish:
-    normalized_data = RAICHU_NORMALIZE.out.normalized_cool
-    loop_calls = MERGE_CHROMOSOME_LOOPS.out.loops
-    combined_results = COMBINE_LOOPS.out.combined
-    visualization = BEDPE_TO_ARC.out.arc
-    statistics = GENERATE_STATS.out.stats
+    normalized_data = RAICHU_NORMALIZE.out.normalized_cool.map { sample_id, cool -> cool }
+    loop_calls = MERGE_CHROMOSOME_LOOPS.out.loops.map { sample_id, loops -> loops }
+    combined_results = COMBINE_LOOPS.out.combined.map { sample_id, combined -> combined }
+    visualisation = BEDPE_TO_ARC.out.arc.map { sample_id, arc -> arc }
+    
 }
 
 workflow.onComplete {
