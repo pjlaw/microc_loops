@@ -1,5 +1,7 @@
 #!/usr/bin/env nextflow
 
+nextflow.preview.output = true
+
 /*
  * Raichu + pyHICCUPS Multi-Resolution Pipeline
  * 
@@ -33,6 +35,7 @@ log.info """\
 /*
  * Process: Normalise Hi-C data using raichu
  */
+ /*
 process RAICHU_NORMALISE {
     tag "${sample_id}"
     conda '/data/scratch/DGE/DUDGE/MOPOPGEN/plaw/conda_envs/raichu'
@@ -64,6 +67,7 @@ process RAICHU_NORMALISE {
     fi   
     """
 }
+*/
 
 /*
  * Process: Call loops per chromosome at a specific resolution using pyHICCUPS
@@ -201,9 +205,10 @@ workflow {
     //TODO: filechecking
     // resolutions must match those in the mcool file
     // if cool file is given, can only use one resoulution
+    // also check named cool or mcool
     
     // Step 1: Normalise with raichu
-    RAICHU_NORMALISE(cool_files_ch)
+    // RAICHU_NORMALISE(cool_files_ch)
     
     // Step 2: Create a channel of chromosome names: chr1-chr22, chrX, chrY
     // Create chromosome channel from file for each sample
@@ -221,7 +226,8 @@ workflow {
     res_chrom_combinations = chromosomes_per_sample
         .combine(resolutions_ch)
         .map { sample_id, chrom, res -> tuple(sample_id, chrom, res) }
-        .combine(RAICHU_NORMALISE.out.normalised_cool, by: 0)
+        //.combine(RAICHU_NORMALISE.out.normalised_cool, by: 0)
+        .combine(cool_files_ch, by: 0)
         .map { sample_id, chrom, res, cool -> tuple(sample_id, cool, res, chrom) }
     
     PYHICCUPS_CALL_LOOPS_PER_CHROM(res_chrom_combinations)

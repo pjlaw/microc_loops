@@ -3,11 +3,12 @@
 work/
 results/
 test_results/
+pipeline_info/
 
 # Reports
 *.html
 *.svg
-trace.txt
+*execution_trace*.txt
 
 # Python
 __pycache__/

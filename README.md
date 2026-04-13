@@ -1,20 +1,19 @@
 # Micro-C Loops Pipeline
 
-A Nextflow pipeline for detecting chromatin loops from Hi-C/Micro-C data using raichu normalization and pyHICCUPS loop calling.
+A Nextflow pipeline for detecting chromatin loops from Hi-C/Micro-C data using raichu normalisation and pyHICCUPS loop calling.
 
 ## Overview
 
 This pipeline performs multi-resolution loop detection from Hi-C/Micro-C contact matrices:
 
-1. **Normalization** - Uses [raichu](https://github.com/open2c/raichu) for ICE-like normalization
-2. **Chromosome Detection** - Automatically extracts chromosome list from the input file
-3. **Parallel Loop Calling** - Applies [pyHICCUPS](https://github.com/ParkerLab/pyHICCUPS) per chromosome at multiple resolutions (default: 2kb, 5kb, 10kb) for maximum parallelization
-4. **Merging** - Combines per-chromosome results for each resolution
-5. **Combination** - Merges loops from all resolutions
-6. **Format Conversion** - Converts BEDPE to arc format for genome browser visualization
-7. **Statistics** - Generates summary statistics
+1. **normalisation** - Uses [Raichu](https://github.com/XiaoTaoWang/Raichu) for normalisation
+2. **Loop Calling** - Applies [pyHICCUPS as implemented in HiCPeaks](https://github.com/XiaoTaoWang/HiCPeaks) per chromosome at multiple resolutions (default: 2kb, 5kb, 10kb) for maximum parallelisation
+3. **Merging** - Combines per-chromosome results for each resolution
+4. **Combination** - Merges loops from all resolutions
+5. **Format Conversion** - Converts BEDPE to arc format for genome browser visualisation (e.g. pygenometracks)
 
-### Parallelization
+
+### Parallelisation
 
 The pipeline parallelizes loop calling by **chromosome and resolution**, meaning if you have 23 chromosomes and 3 resolutions, it will run up to **69 parallel tasks** (23 × 3), significantly reducing runtime on HPC clusters.
 
@@ -107,13 +106,13 @@ results/
 │       └── loops_10000.bedpe    # Merged loops at 10kb resolution
 ├── combined/
 │   └── combined_loops.bedpe     # All loops merged
-├── visualization/
+├── visualisation/
 │   └── loops.arc                # Arc format for genome browsers
 ├── stats/
 │   └── pipeline_stats.txt       # Summary statistics
 └── reports/
     ├── execution_report.html    # Nextflow execution report
-    ├── timeline.html            # Timeline visualization
+    ├── timeline.html            # Timeline visualisation
     ├── trace.txt               # Resource usage trace
     └── pipeline_dag.svg        # Pipeline DAG diagram
 ```
@@ -130,7 +129,7 @@ chr1  start1  end1  chr2  start2  end2  [additional_columns]
 
 ### Arc Format
 
-Simple 4-column format for visualization:
+Simple 4-column format for visualisation:
 
 ```
 chr  start  end  score
@@ -173,7 +172,7 @@ nextflow run main.nf \
 
 ### Default Resources
 
-| Process | CPUs | Memory | Time | Parallelization |
+| Process | CPUs | Memory | Time | Parallelisation |
 |---------|------|--------|------|----------------|
 | RAICHU_NORMALIZE | 4 | 8 GB | 6h | 1 task |
 | GET_CHROMOSOMES | 1 | 2 GB | 1h | 1 task |
@@ -186,42 +185,6 @@ nextflow run main.nf \
 **Performance Note**: The pipeline parallelizes loop calling per chromosome, so if you have access to an HPC cluster with many cores, you can process all chromosomes simultaneously, reducing total runtime from days to hours.
 
 Adjust resources in `nextflow.config` based on your data size and available compute.
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Out of memory errors**
-   ```bash
-   # Increase memory in nextflow.config
-   process.memory = '16.GB'
-   ```
-
-2. **Long running times**
-   ```bash
-   # Reduce resolution count or increase CPUs
-   nextflow run main.nf --resolutions 5000,10000
-   ```
-
-3. **Container pull failures**
-   ```bash
-   # Pre-pull containers or use conda profile
-   nextflow run main.nf -profile conda
-   ```
-
-### Logs and Debugging
-
-```bash
-# Run with debug output
-nextflow run main.nf --input data.cool -with-trace -with-report
-
-# Check work directory for intermediate files
-ls -la work/
-
-# View specific task logs
-cat .nextflow.log
-```
-
 
 ## Acknowledgments
 
