@@ -213,6 +213,7 @@ workflow {
     chromosomes_per_sample = cool_files_ch
         .map { sample_id, file -> sample_id }
         .combine(chromosomes)
+        }
         
     
     // Step 3: Call loops per chromosome per resolution (parallel execution)
