@@ -8,7 +8,7 @@ pipeline_info/
 # Reports
 *.html
 *.svg
-*execution_trace*.txt
+trace.txt
 
 # Python
 __pycache__/
@@ -42,7 +42,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
-*.sh
 
 # Temporary files
 tmp/
